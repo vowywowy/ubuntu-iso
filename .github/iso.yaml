@@ -1,0 +1,94 @@
+name: Real-Time Automated ISO (1st Party Only)
+on: 
+  workflow_dispatch:
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install System Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xorriso aria2 -qq
+
+      - name: Parallel Download
+        run: |
+          aria2c -x 16 -s 16 -k 1M "https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso" -o official.iso
+
+      - name: Build & Patch in RAM
+        run: |
+          mkdir -p nocloud
+          cat <<EOF > nocloud/user-data
+          #cloud-config
+          autoinstall:
+            version: 1
+            storage: {layout: {name: direct}}
+            identity: {hostname: ubuntu-server, username: ubuntu, password: "!"}
+            ssh: {install-server: true, allow-pw: false}
+            user-data:
+              ssh_import_id: [gh:vowywowy]
+              sudo: ALL=(ALL) NOPASSWD:ALL
+          EOF
+          touch nocloud/meta-data
+
+          # Extract and patch GRUB for 100% automation
+          osirrox -indev official.iso -extract /boot/grub/grub.cfg grub_modified.cfg
+          sed -i 's/---/ autoinstall  ---/g' grub_modified.cfg
+
+          # Build the new ISO using xorriso mapping
+          xorriso -indev official.iso \
+            -outdev custom-ubuntu.iso \
+            -map nocloud/user-data /user-data \
+            -map nocloud/meta-data /meta-data \
+            -map grub_modified.cfg /boot/grub/grub.cfg \
+            -boot_image any replay \
+            -changes_pending yes
+
+      - name: Generate Portable PowerShell Burn Script
+        run: |
+          cat <<'EOF' > Flash-UbuntuUSB.ps1
+          $ISO = "custom-ubuntu.iso"
+          
+          Write-Host "--- Flashing Phase ---" -ForegroundColor Cyan
+          Get-Disk | Where-Object BusType -eq 'USB' | Select-Object Number, FriendlyName, Size
+          $DiskNumber = Read-Host "Enter the DISK NUMBER of your USB drive"
+          $TargetDisk = Get-Disk -Number $DiskNumber
+          
+          Write-Host "WARNING: This will WIPE ALL DATA on $($TargetDisk.FriendlyName). Continue? (Y/N)" -ForegroundColor Yellow
+          if ((Read-Host) -ne "Y") { exit }
+
+          # Clean and Prepare Disk
+          Clear-Disk -Number $DiskNumber -RemoveData -Confirm:$false
+          Initialize-Disk -Number $DiskNumber -PartitionStyle GPT
+          $Part = New-Partition -DiskNumber $DiskNumber -UseMaximumSize -AssignDriveLetter
+          $DriveLetter = ($Part | Format-Volume -FileSystem FAT32 -NewFileSystemLabel "UBUNTU").DriveLetter
+          
+          Write-Host "Mounting ISO and Copying Files... this may take a few minutes."
+          $Mounted = Mount-DiskImage -ImagePath (Get-Item $ISO).FullName -PassThru
+          $ISODrive = ($Mounted | Get-Volume).DriveLetter
+          xcopy "$($ISODrive):\*" "$($DriveLetter):\" /E /H /F
+          Dismount-DiskImage -ImagePath (Get-Item $ISO).FullName
+          
+          Write-Host "`nSuccessfully created bootable USB!" -ForegroundColor Green
+          EOF
+
+      - name: Create Release via GitHub CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="vowy-$(date +'%Y%m%d-%H%M')"
+          gh release create "$TAG" \
+            ./custom-ubuntu.iso \
+            ./Flash-UbuntuUSB.ps1 \
+            --title "Ubuntu Build $TAG" \
+            --notes "Automated Ubuntu Server ISO for vowywowy."
+
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/$TAG"
+          echo "### 🚀 Build Success!" >> $GITHUB_STEP_SUMMARY
+          echo "1. **[Download ISO]($BASE_URL/custom-ubuntu.iso)**" >> $GITHUB_STEP_SUMMARY
+          echo "2. **[Download Burn Script]($BASE_URL/Flash-UbuntuUSB.ps1)**" >> $GITHUB_STEP_SUMMARY
