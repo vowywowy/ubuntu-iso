@@ -1,4 +1,4 @@
-name: Real-Time Automated ISO (Final Build + Auto-Reboot)
+name: Real-Time Automated ISO (Fix Libs)
 on: 
   workflow_dispatch:
 
@@ -14,15 +14,18 @@ jobs:
 
       - name: Fast Binary Setup (Nitro Parallel)
         run: |
-          mkdir -p xorriso_bin/usr
+          mkdir -p xorriso_bin/usr/lib/x86_64-linux-gnu
           cd xorriso_bin
           BASE_URL="http://azure.archive.ubuntu.com/ubuntu/pool/main"
+          
+          # Parallel download
           aria2c -x 16 -s 16 -k 1M \
             "${BASE_URL}/libi/libisoburn/xorriso_1.5.6-1.1ubuntu3_amd64.deb" \
             "${BASE_URL}/libi/libisoburn/libisoburn1t64_1.5.6-1.1ubuntu3_amd64.deb" \
             "${BASE_URL}/libi/libisofs/libisofs6t64_1.5.6.pl01-1.1ubuntu2_amd64.deb" \
             "${BASE_URL}/libb/libburn/libburn4t64_1.5.6-1.1build1_amd64.deb"
           
+          # Parallel extraction
           for f in *.deb; do
             (
               mkdir -p "tmp_$f" && cd "tmp_$f"
@@ -33,8 +36,16 @@ jobs:
             ) &
           done
           wait
-          echo "$(pwd)/usr/bin" >> $GITHUB_PATH
-          echo "LD_LIBRARY_PATH=$(pwd)/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+          # CRITICAL FIX: Create symlinks for the new t64 library names
+          cd usr/lib/x86_64-linux-gnu
+          ln -s libisoburn.so.1.11.0 libisoburn.so.1 || true
+          ln -s libisofs.so.6.76.0 libisofs.so.6 || true
+          ln -s libburn.so.4.101.0 libburn.so.4 || true
+          
+          cd ../../../..
+          echo "$(pwd)/xorriso_bin/usr/bin" >> $GITHUB_PATH
+          echo "LD_LIBRARY_PATH=$(pwd)/xorriso_bin/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
 
       - name: Parallel ISO Download
         run: |
@@ -79,6 +90,7 @@ jobs:
               - curtin in-target -- usermod -aG docker ubuntu
               - curtin in-target -- systemctl enable unattended-upgrades
               - curtin in-target -- dpkg-reconfigure -f noninteractive unattended-upgrades
+              - reboot
           EOF
           touch nocloud/meta-data
 
