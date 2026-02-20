@@ -1,119 +1,85 @@
-name: Real-Time Automated ISO (Fix Libs)
-on: 
+name: Build Custom Ubuntu ISO (Peak Efficiency)
+
+on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
 
 jobs:
   build-iso:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
-      actions: write
       contents: read
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Cache Xorriso Binaries
+        id: cache-xorriso
+        uses: actions/cache@v4
+        with:
+          path: /dev/shm/xorriso_bin
+          key: xorriso-v3
 
-      - name: Fast Binary Setup (Nitro Parallel)
+      - name: Integrated Build and Upload
         run: |
-          mkdir -p xorriso_bin/usr/lib/x86_64-linux-gnu
-          cd xorriso_bin
-          BASE_URL="http://azure.archive.ubuntu.com/ubuntu/pool/main"
+          cd /dev/shm
           
-          # Parallel download
-          aria2c -x 16 -s 16 -k 1M \
-            "${BASE_URL}/libi/libisoburn/xorriso_1.5.6-1.1ubuntu3_amd64.deb" \
-            "${BASE_URL}/libi/libisoburn/libisoburn1t64_1.5.6-1.1ubuntu3_amd64.deb" \
-            "${BASE_URL}/libi/libisofs/libisofs6t64_1.5.6.pl01-1.1ubuntu2_amd64.deb" \
-            "${BASE_URL}/libb/libburn/libburn4t64_1.5.6-1.1build1_amd64.deb"
+          # 1. Setup Xorriso (Conditional Download)
+          if [ "${{ steps.cache-xorriso.outputs.cache-hit }}" != "true" ]; then
+            mkdir -p xorriso_bin/usr/lib/x86_64-linux-gnu
+            cd xorriso_bin
+            BASE_URL="http://azure.archive.ubuntu.com/ubuntu/pool/main"
+            aria2c -x 16 -s 16 -k 1M \
+              "${BASE_URL}/libi/libisoburn/xorriso_1.5.6-1.1ubuntu3_amd64.deb" \
+              "${BASE_URL}/libi/libisoburn/libisoburn1t64_1.5.6-1.1ubuntu3_amd64.deb" \
+              "${BASE_URL}/libi/libisofs/libisofs6t64_1.5.6.pl01-1.1ubuntu2_amd64.deb" \
+              "${BASE_URL}/libb/libburn/libburn4t64_1.5.6-1.1build1_amd64.deb"
+            for f in *.deb; do ar x "$f" && tar -xf data.tar.*; done
+            cd usr/lib/x86_64-linux-gnu
+            ln -sf libisoburn.so.1.* libisoburn.so.1
+            ln -sf libisofs.so.6.* libisofs.so.6
+            ln -sf libburn.so.4.* libburn.so.4
+            cd /dev/shm
+          fi
+
+          # 2. Path Exports
+          export PATH="$(pwd)/xorriso_bin/usr/bin:$PATH"
+          export LD_LIBRARY_PATH="$(pwd)/xorriso_bin/usr/lib/x86_64-linux-gnu"
+
+          # 3. ISO Download & Patching
+          aria2c -x 16 -s 16 -k 1M "https://releases.ubuntu.com/24.04.1/ubuntu-24.04.1-live-server-amd64.iso" -o official.iso
           
-          # Parallel extraction
-          for f in *.deb; do
-            (
-              mkdir -p "tmp_$f" && cd "tmp_$f"
-              ar x "../$f"
-              DATA_ARCHIVE=$(ls data.tar.*)
-              tar --use-compress-program=zstd -xf "$DATA_ARCHIVE" || tar -xf "$DATA_ARCHIVE"
-              cp -r usr/* ../usr/
-            ) &
-          done
-          wait
-
-          # CRITICAL FIX: Create symlinks for the new t64 library names
-          cd usr/lib/x86_64-linux-gnu
-          ln -s libisoburn.so.1.11.0 libisoburn.so.1 || true
-          ln -s libisofs.so.6.76.0 libisofs.so.6 || true
-          ln -s libburn.so.4.101.0 libburn.so.4 || true
-          
-          cd ../../../..
-          echo "$(pwd)/xorriso_bin/usr/bin" >> $GITHUB_PATH
-          echo "LD_LIBRARY_PATH=$(pwd)/xorriso_bin/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-
-      - name: Parallel ISO Download
-        run: |
-          URL="https://releases.ubuntu.com/24.04.1/ubuntu-24.04.1-live-server-amd64.iso"
-          aria2c -x 16 -s 16 -k 1M "$URL" -o official.iso
-
-      - name: Fetch SSH Keys & Patch ISO
-        run: |
           SSH_KEYS=$(curl -s https://github.com/vowywowy.keys)
-          mkdir -p nocloud
+          mkdir -p nocloud grub_patch
           cat <<EOF > nocloud/user-data
           #cloud-config
           autoinstall:
             version: 1
             storage: {layout: {name: direct}}
-            identity: 
-              hostname: ai
-              username: ubuntu
-              password: "!"
+            identity: {hostname: ai, username: ubuntu, password: "!"}
             ssh:
               install-server: true
               authorized-keys:
-          $(echo "$SSH_KEYS" | sed 's/^/                - /')
-            package_update: true
-            package_upgrade: true
-            apt:
-              sources:
-                docker.list:
-                  source: "deb [arch=amd64] https://download.docker.com/linux/ubuntu noble stable"
-                  keyid: 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
-            packages:
-              - docker-ce
-              - docker-ce-cli
-              - containerd.io
-              - docker-buildx-plugin
-              - docker-compose-plugin
-              - unattended-upgrades
-              - linux-generic
-            user-data:
-              sudo: ALL=(ALL) NOPASSWD:ALL
+          $(echo "$SSH_KEYS" | sed 's/^/      - /')
+            packages: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin, unattended-upgrades, linux-generic]
+            user-data: {sudo: "ALL=(ALL) NOPASSWD:ALL"}
             late-commands:
               - curtin in-target -- usermod -aG docker ubuntu
-              - curtin in-target -- systemctl enable unattended-upgrades
-              - curtin in-target -- dpkg-reconfigure -f noninteractive unattended-upgrades
               - reboot
           EOF
-          touch nocloud/meta-data
 
           7z e official.iso boot/grub/grub.cfg -ogrub_patch
           sed -i 's/---/ autoinstall  ---/g' grub_patch/grub.cfg
 
+          # 4. Build ISO
           xorriso -indev official.iso \
-            -outdev custom-ubuntu.iso \
+            -outdev custom-ubuntu-24.04.iso \
             -map nocloud/user-data /user-data \
-            -map nocloud/meta-data /meta-data \
+            -map /dev/null /meta-data \
             -map grub_patch/grub.cfg /boot/grub/grub.cfg \
             -boot_image any replay \
             -changes_pending yes
 
-      - name: ⚡ Upload Flash Script
-        uses: actions/upload-artifact@v4
-        with:
-          name: flash-script
-          path: Flash-UbuntuUSB.ps1
-
-      - name: 🐘 Upload Custom ISO
-        uses: actions/upload-artifact@v4
-        with:
-          name: custom-ubuntu-iso
-          path: custom-ubuntu.iso
-          compression-level: 0
+          # 5. Upload via GH CLI
+          gh run upload ${{ github.run_id }} custom-ubuntu-24.04.iso
