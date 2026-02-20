@@ -12,23 +12,32 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Fast Binary Fetch
+      - name: Fast Binary Setup (No Apt Update)
         run: |
-          # Download a static xorriso binary (no dependencies needed)
-          mkdir -p bin
-          curl -L https://github.com/mcmilk/7-Zip-zstd/releases/download/v22.01-v1.5.4-r1/xorriso-1.5.4-x86_64-unknown-linux-musl.tar.gz | tar -xz -C bin
-          chmod +x bin/xorriso
-          echo "$(pwd)/bin" >> $GITHUB_PATH
+          # Download xorriso and dependencies directly as .deb files
+          # This takes ~2 seconds vs ~60 seconds for apt update
+          mkdir -p xorriso_bin
+          cd xorriso_bin
+          BASE_URL="http://azure.archive.ubuntu.com/ubuntu/pool/main/libi/libisoburn"
+          aria2c -x 16 -s 16 -k 1M "${BASE_URL}/xorriso_1.5.6-1.1ubuntu3_amd64.deb"
+          aria2c -x 16 -s 16 -k 1M "${BASE_URL}/libisoburn1t64_1.5.6-1.1ubuntu3_amd64.deb"
+          aria2c -x 16 -s 16 -k 1M "http://azure.archive.ubuntu.com/ubuntu/pool/main/libi/libisofs/libisofs6t64_1.5.6.pl01-1.1ubuntu2_amd64.deb"
+          aria2c -x 16 -s 16 -k 1M "http://azure.archive.ubuntu.com/ubuntu/pool/main/libb/libburn/libburn4t64_1.5.6-1.1build1_amd64.deb"
+          
+          # Manually extract the binaries and libs
+          for f in *.deb; do ar x $f; tar -xf data.tar.xz; done
+          
+          # Add to PATH and LD_LIBRARY_PATH
+          echo "$(pwd)/usr/bin" >> $GITHUB_PATH
+          echo "LD_LIBRARY_PATH=$(pwd)/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Parallel ISO Download
         run: |
-          # aria2c is pre-installed on the runner
           URL="https://releases.ubuntu.com/24.04.1/ubuntu-24.04.1-live-server-amd64.iso"
           aria2c -x 16 -s 16 -k 1M "$URL" -o official.iso
 
-      - name: Patch & Repack (The "In-Place" Method)
+      - name: Patch & Repack (100% Automated)
         run: |
-          # 1. Create the auto-install config
           mkdir -p nocloud
           cat <<EOF > nocloud/user-data
           #cloud-config
@@ -43,14 +52,11 @@ jobs:
           EOF
           touch nocloud/meta-data
 
-          # 2. Extract ONLY grub.cfg using 7z (pre-installed)
+          # Use 7z (pre-installed) to grab just the boot config
           7z e official.iso boot/grub/grub.cfg -ogrub_patch
-          
-          # 3. Inject the 'autoinstall' parameter into the grub config
           sed -i 's/---/ autoinstall  ---/g' grub_patch/grub.cfg
 
-          # 4. Use xorriso to "overlay" our modifications onto the existing ISO structure
-          # This avoids extracting 2.6GB of data.
+          # Build the ISO using the 'overlay' method
           xorriso -indev official.iso \
             -outdev custom-ubuntu.iso \
             -map nocloud/user-data /user-data \
@@ -65,13 +71,12 @@ jobs:
           $ZipFile = Get-ChildItem -Filter "custom-ubuntu-iso.zip" | Select-Object -First 1
           $ISO = "custom-ubuntu.iso"
           if ($ZipFile) {
-              Write-Host "Detected ZIP artifact. Extracting..." -ForegroundColor Cyan
+              Write-Host "Detected ZIP. Extracting..." -ForegroundColor Cyan
               Expand-Archive -Path $ZipFile.FullName -DestinationPath $PSScriptRoot -Force
           }
           Write-Host "--- Flashing Phase ---" -ForegroundColor Cyan
           Get-Disk | Where-Object BusType -eq 'USB' | Select-Object Number, FriendlyName, Size
           $DiskNumber = Read-Host "Enter the DISK NUMBER of your USB drive"
-          $TargetDisk = Get-Disk -Number $DiskNumber
           Clear-Disk -Number $DiskNumber -RemoveData -Confirm:$false
           Initialize-Disk -Number $DiskNumber -PartitionStyle GPT
           $Part = New-Partition -DiskNumber $DiskNumber -UseMaximumSize -AssignDriveLetter
