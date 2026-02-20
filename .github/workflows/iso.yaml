@@ -12,22 +12,26 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Fast Binary Setup (No Apt Update)
+      - name: Fast Binary Setup (Zero Apt)
         run: |
-          # Download xorriso and dependencies directly as .deb files
-          # This takes ~2 seconds vs ~60 seconds for apt update
           mkdir -p xorriso_bin
           cd xorriso_bin
+          
+          # Direct URLs to Ubuntu 24.04 package pool
           BASE_URL="http://azure.archive.ubuntu.com/ubuntu/pool/main/libi/libisoburn"
           aria2c -x 16 -s 16 -k 1M "${BASE_URL}/xorriso_1.5.6-1.1ubuntu3_amd64.deb"
           aria2c -x 16 -s 16 -k 1M "${BASE_URL}/libisoburn1t64_1.5.6-1.1ubuntu3_amd64.deb"
           aria2c -x 16 -s 16 -k 1M "http://azure.archive.ubuntu.com/ubuntu/pool/main/libi/libisofs/libisofs6t64_1.5.6.pl01-1.1ubuntu2_amd64.deb"
           aria2c -x 16 -s 16 -k 1M "http://azure.archive.ubuntu.com/ubuntu/pool/main/libb/libburn/libburn4t64_1.5.6-1.1build1_amd64.deb"
           
-          # Manually extract the binaries and libs
-          for f in *.deb; do ar x $f; tar -xf data.tar.xz; done
+          # Extract whatever data archive is inside (xz or zst)
+          for f in *.deb; do 
+            ar x $f
+            # Find the data archive regardless of extension
+            DATA_ARCHIVE=$(ls data.tar.*)
+            tar --use-compress-program=zstd -xf "$DATA_ARCHIVE" || tar -xf "$DATA_ARCHIVE"
+          done
           
-          # Add to PATH and LD_LIBRARY_PATH
           echo "$(pwd)/usr/bin" >> $GITHUB_PATH
           echo "LD_LIBRARY_PATH=$(pwd)/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
@@ -36,7 +40,7 @@ jobs:
           URL="https://releases.ubuntu.com/24.04.1/ubuntu-24.04.1-live-server-amd64.iso"
           aria2c -x 16 -s 16 -k 1M "$URL" -o official.iso
 
-      - name: Patch & Repack (100% Automated)
+      - name: Patch & Repack
         run: |
           mkdir -p nocloud
           cat <<EOF > nocloud/user-data
@@ -52,11 +56,11 @@ jobs:
           EOF
           touch nocloud/meta-data
 
-          # Use 7z (pre-installed) to grab just the boot config
+          # Use 7z to grab and patch GRUB
           7z e official.iso boot/grub/grub.cfg -ogrub_patch
           sed -i 's/---/ autoinstall  ---/g' grub_patch/grub.cfg
 
-          # Build the ISO using the 'overlay' method
+          # Map the modified files over the original ISO structure
           xorriso -indev official.iso \
             -outdev custom-ubuntu.iso \
             -map nocloud/user-data /user-data \
@@ -85,7 +89,7 @@ jobs:
           $ISODrive = ($Mounted | Get-Volume).DriveLetter
           xcopy "$($ISODrive):\*" "$($DriveLetter):\" /E /H /F
           Dismount-DiskImage -ImagePath (Get-Item $ISO).FullName
-          Write-Host "Success! USB is ready." -ForegroundColor Green
+          Write-Host "Done!" -ForegroundColor Green
           EOF
 
       - name: Upload Artifacts
