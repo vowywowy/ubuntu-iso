@@ -19,18 +19,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /dev/shm/xorriso_bin
-          key: xorriso-v4 # Incremented key
+          key: xorriso-v6 # New key for a clean, non-PowerShell environment
 
-      - name: Integrated Build and Upload
+      - name: Integrated Build
         run: |
           cd /dev/shm
           
-          # 1. Setup Xorriso (Fixed Multi-Download)
+          # 1. Setup Xorriso (Bash Logic)
           if [ "${{ steps.cache-xorriso.outputs.cache-hit }}" != "true" ]; then
             mkdir -p xorriso_bin/usr/lib/x86_64-linux-gnu
             cd xorriso_bin
             
-            # Explicitly listing URLs to ensure aria2c catches all 4
             BASE="http://azure.archive.ubuntu.com/ubuntu/pool/main"
             echo "${BASE}/libi/libisoburn/xorriso_1.5.6-1.1ubuntu3_amd64.deb" > list.txt
             echo "${BASE}/libi/libisoburn/libisoburn1t64_1.5.6-1.1ubuntu3_amd64.deb" >> list.txt
@@ -49,14 +48,16 @@ jobs:
           fi
 
           # 2. Path Exports
-          export PATH="$(pwd)/xorriso_bin/usr/bin:$PATH"
-          export LD_LIBRARY_PATH="$(pwd)/xorriso_bin/usr/lib/x86_64-linux-gnu"
+          export PATH="/dev/shm/xorriso_bin/usr/bin:$PATH"
+          export LD_LIBRARY_PATH="/dev/shm/xorriso_bin/usr/lib/x86_64-linux-gnu"
 
           # 3. ISO Download & Patching
-          aria2c -x 16 -s 16 -k 1M "https://releases.ubuntu.com/24.04.1/ubuntu-24.04.1-live-server-amd64.iso" -o official.iso
+          # Using old-releases to prevent the 2-second redirect seen in your logs
+          aria2c -x 16 -s 16 -k 1M "https://old-releases.ubuntu.com/releases/24.04.1/ubuntu-24.04.1-live-server-amd64.iso" -o official.iso
           
           SSH_KEYS=$(curl -s https://github.com/vowywowy.keys)
           mkdir -p nocloud grub_patch
+          
           cat <<EOF > nocloud/user-data
           #cloud-config
           autoinstall:
@@ -86,5 +87,9 @@ jobs:
             -boot_image any replay \
             -changes_pending yes
 
-          # 5. Upload via GH CLI
-          gh run upload ${{ github.run_id }} custom-ubuntu-24.04.iso
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-ubuntu-24.04
+          path: /dev/shm/custom-ubuntu-24.04.iso
+          retention-days: 1
