@@ -6,24 +6,29 @@ jobs:
   build-iso:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      actions: read
+      actions: write
+      contents: read
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install System Tools
+      - name: Fast Binary Fetch
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y xorriso aria2 -qq
+          # Download a static xorriso binary (no dependencies needed)
+          mkdir -p bin
+          curl -L https://github.com/mcmilk/7-Zip-zstd/releases/download/v22.01-v1.5.4-r1/xorriso-1.5.4-x86_64-unknown-linux-musl.tar.gz | tar -xz -C bin
+          chmod +x bin/xorriso
+          echo "$(pwd)/bin" >> $GITHUB_PATH
 
-      - name: Parallel Download
+      - name: Parallel ISO Download
         run: |
+          # aria2c is pre-installed on the runner
           URL="https://releases.ubuntu.com/24.04.1/ubuntu-24.04.1-live-server-amd64.iso"
           aria2c -x 16 -s 16 -k 1M "$URL" -o official.iso
 
-      - name: Build & Patch in RAM
+      - name: Patch & Repack (The "In-Place" Method)
         run: |
+          # 1. Create the auto-install config
           mkdir -p nocloud
           cat <<EOF > nocloud/user-data
           #cloud-config
@@ -36,26 +41,37 @@ jobs:
               ssh_import_id: [gh:vowywowy]
               sudo: ALL=(ALL) NOPASSWD:ALL
           EOF
-          osirrox -indev official.iso -extract /boot/grub/grub.cfg grub_modified.cfg
-          sed -i 's/---/ autoinstall  ---/g' grub_modified.cfg
+          touch nocloud/meta-data
 
+          # 2. Extract ONLY grub.cfg using 7z (pre-installed)
+          7z e official.iso boot/grub/grub.cfg -ogrub_patch
+          
+          # 3. Inject the 'autoinstall' parameter into the grub config
+          sed -i 's/---/ autoinstall  ---/g' grub_patch/grub.cfg
+
+          # 4. Use xorriso to "overlay" our modifications onto the existing ISO structure
+          # This avoids extracting 2.6GB of data.
           xorriso -indev official.iso \
             -outdev custom-ubuntu.iso \
             -map nocloud/user-data /user-data \
-            -map grub_modified.cfg /boot/grub/grub.cfg \
+            -map nocloud/meta-data /meta-data \
+            -map grub_patch/grub.cfg /boot/grub/grub.cfg \
             -boot_image any replay \
             -changes_pending yes
 
-      - name: Generate PowerShell Burn Script
+      - name: Generate Smart PowerShell Burn Script
         run: |
           cat <<'EOF' > Flash-UbuntuUSB.ps1
+          $ZipFile = Get-ChildItem -Filter "custom-ubuntu-iso.zip" | Select-Object -First 1
           $ISO = "custom-ubuntu.iso"
+          if ($ZipFile) {
+              Write-Host "Detected ZIP artifact. Extracting..." -ForegroundColor Cyan
+              Expand-Archive -Path $ZipFile.FullName -DestinationPath $PSScriptRoot -Force
+          }
           Write-Host "--- Flashing Phase ---" -ForegroundColor Cyan
           Get-Disk | Where-Object BusType -eq 'USB' | Select-Object Number, FriendlyName, Size
           $DiskNumber = Read-Host "Enter the DISK NUMBER of your USB drive"
           $TargetDisk = Get-Disk -Number $DiskNumber
-          Write-Host "WARNING: This will WIPE ALL DATA on $($TargetDisk.FriendlyName). Continue? (Y/N)" -ForegroundColor Yellow
-          if ((Read-Host) -ne "Y") { exit }
           Clear-Disk -Number $DiskNumber -RemoveData -Confirm:$false
           Initialize-Disk -Number $DiskNumber -PartitionStyle GPT
           $Part = New-Partition -DiskNumber $DiskNumber -UseMaximumSize -AssignDriveLetter
@@ -64,27 +80,14 @@ jobs:
           $ISODrive = ($Mounted | Get-Volume).DriveLetter
           xcopy "$($ISODrive):\*" "$($DriveLetter):\" /E /H /F
           Dismount-DiskImage -ImagePath (Get-Item $ISO).FullName
-          Write-Host "Successfully created bootable USB!" -ForegroundColor Green
+          Write-Host "Success! USB is ready." -ForegroundColor Green
           EOF
 
-      - name: Upload ISO as Artifact
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: custom-ubuntu-iso
-          path: custom-ubuntu.iso
-          compression-level: 0 # Faster upload, no extra zipping
-
-      - name: Upload Burn Script as Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: flash-script
-          path: Flash-UbuntuUSB.ps1
-
-      - name: Output Summary
-        run: |
-          echo "### 🚀 ISO Build Complete!" >> $GITHUB_STEP_SUMMARY
-          echo "GitHub Release has a 2GB limit, so the 2.6GB ISO is stored in **Artifacts**." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. Go to the **Summary** tab of this run." >> $GITHUB_STEP_SUMMARY
-          echo "2. Download \`custom-ubuntu-iso\` (Artifacts section at the bottom)." >> $GITHUB_STEP_SUMMARY
-          echo "3. Download \`flash-script\`." >> $GITHUB_STEP_SUMMARY
+          path: |
+            custom-ubuntu.iso
+            Flash-UbuntuUSB.ps1
+          compression-level: 0
