@@ -7,6 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -18,11 +19,8 @@ jobs:
 
       - name: Parallel Download
         run: |
-          # Updated to a more robust URL for 24.04 LTS
-          # Using the 'current' directory ensures we find the live file
           URL="https://releases.ubuntu.com/24.04.1/ubuntu-24.04.1-live-server-amd64.iso"
-          aria2c -x 16 -s 16 -k 1M "$URL" -o official.iso || \
-          wget -O official.iso "https://releases.ubuntu.com/24.04/ubuntu-24.04.1-live-server-amd64.iso"
+          aria2c -x 16 -s 16 -k 1M "$URL" -o official.iso
 
       - name: Build & Patch in RAM
         run: |
@@ -38,22 +36,17 @@ jobs:
               ssh_import_id: [gh:vowywowy]
               sudo: ALL=(ALL) NOPASSWD:ALL
           EOF
-          touch nocloud/meta-data
-
-          # Extract and patch GRUB
           osirrox -indev official.iso -extract /boot/grub/grub.cfg grub_modified.cfg
           sed -i 's/---/ autoinstall  ---/g' grub_modified.cfg
 
-          # Build the new ISO
           xorriso -indev official.iso \
             -outdev custom-ubuntu.iso \
             -map nocloud/user-data /user-data \
-            -map nocloud/meta-data /meta-data \
             -map grub_modified.cfg /boot/grub/grub.cfg \
             -boot_image any replay \
             -changes_pending yes
 
-      - name: Generate Portable PowerShell Burn Script
+      - name: Generate PowerShell Burn Script
         run: |
           cat <<'EOF' > Flash-UbuntuUSB.ps1
           $ISO = "custom-ubuntu.iso"
@@ -74,18 +67,24 @@ jobs:
           Write-Host "Successfully created bootable USB!" -ForegroundColor Green
           EOF
 
-      - name: Create Release via GitHub CLI
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="vowy-$(date +'%Y%m%d-%H%M')"
-          gh release create "$TAG" \
-            ./custom-ubuntu.iso \
-            ./Flash-UbuntuUSB.ps1 \
-            --title "Ubuntu Build $TAG" \
-            --notes "Automated Ubuntu Server ISO for vowywowy."
+      - name: Upload ISO as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-ubuntu-iso
+          path: custom-ubuntu.iso
+          compression-level: 0 # Faster upload, no extra zipping
 
-          BASE_URL="https://github.com/${{ github.repository }}/releases/download/$TAG"
-          echo "### 🚀 Build Success!" >> $GITHUB_STEP_SUMMARY
-          echo "1. **[Download ISO]($BASE_URL/custom-ubuntu.iso)**" >> $GITHUB_STEP_SUMMARY
-          echo "2. **[Download Burn Script]($BASE_URL/Flash-UbuntuUSB.ps1)**" >> $GITHUB_STEP_SUMMARY
+      - name: Upload Burn Script as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flash-script
+          path: Flash-UbuntuUSB.ps1
+
+      - name: Output Summary
+        run: |
+          echo "### 🚀 ISO Build Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "GitHub Release has a 2GB limit, so the 2.6GB ISO is stored in **Artifacts**." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to the **Summary** tab of this run." >> $GITHUB_STEP_SUMMARY
+          echo "2. Download \`custom-ubuntu-iso\` (Artifacts section at the bottom)." >> $GITHUB_STEP_SUMMARY
+          echo "3. Download \`flash-script\`." >> $GITHUB_STEP_SUMMARY
